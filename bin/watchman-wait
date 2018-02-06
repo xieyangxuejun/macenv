@@ -1,0 +1,2 @@
+#!/bin/bash
+PYTHONPATH="/usr/local/Cellar/watchman/4.9.0/libexec/lib/python2.7/site-packages" exec "/usr/local/Cellar/watchman/4.9.0/libexec/bin/watchman-wait" "$@"

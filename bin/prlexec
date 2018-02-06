@@ -1,0 +1,131 @@
+#!/bin/bash
+#
+# Utility for executing commands in Parallels Desktop virtual machines.
+#
+# Copyright (c) 2004-2015 Parallels IP Holdings GmbH.
+# All rights reserved.
+# http://www.parallels.com
+
+show_help() {
+help_text=`cat <<EOF
+Usage: prlexec [--vm (VM_ID|VM_NAME)] [--user USER] [--password PASSWD] command
+
+By default executes command in currently running virtual machine through
+prlctl(8) exec under user which is logged into guest's GUI session at the
+moment.
+
+If there's no running VM at the moment it will automatically be started. But
+only in case it is the only one registered in Parallels Desktop.
+
+Options may be used to alter default behaviour:
+  --vm (VM_ID|VM_NAME)  execute command in the specified virtual machine. If it
+                        is not running it will be automatically started.
+  --user USER           execute command under USER
+  --password PASSWD     use password PASSWD to authenticate in guest to execute
+                        command under current user or given by --user option.
+EOF`
+	echo "$help_text"
+}
+
+show_error() {
+	echo "prlexec error: $@" >&2
+}
+
+show_info() {
+	echo "prlexec: $@"
+}
+
+start_vm() {
+	local vm=$1
+
+	show_info "VM '${vm}' will be started"
+	if ! prlctl start "$vm"; then
+		show_error "failed to start '${vm}' VM"
+		exit 1
+	fi
+}
+
+while true; do
+	case "${1}" in
+		--vm)
+			if [ -z "$2" ]; then
+				show_error 'incorrect usage'
+				exit 1
+			fi
+			vm=$2
+			shift 2
+			;;
+		--user)
+			if [ -z "$2" ]; then
+				show_error 'incorrect usage'
+				exit 1
+			fi
+			user=$2
+			shift 2
+			;;
+		--password)
+			password=$2
+			shift 2
+			;;
+		-h|--help)
+			show_help
+			exit 0
+			;;
+		*)
+			break;
+			;;
+	esac
+done
+
+if [ -z "$1" ]; then
+	show_error 'incorrect usage'
+	exit 1
+fi
+
+if ! type prlctl >/dev/null 2>&1; then
+	show_error 'prlctl not found'
+	exit 1
+fi
+
+if [ -z "$vm" ]; then
+	vm_list=$(prlctl list -a | sed '1d')
+	vm=$(echo "$vm_list" | grep -E '^\{[0-9a-f-]{36}\}  running ')
+
+	if [ -z "$vm" ]; then
+		if [ $(echo "$vm_list" | grep -c '') -ne 1 ]; then
+			show_error 'cannot choose VM to start'
+			exit 1
+		fi
+		vm=$(echo "$vm_list" | sed 's/^\({[0-9a-f-]*}\) .*$/\1/')
+		start_vm "$vm"
+
+	elif [ $(echo "$vm" | grep -c '') -ne 1 ]; then
+		show_error 'several VM-s are running'
+		exit 1
+
+	else
+		vm=$(echo "$vm" | sed 's/^\({[0-9a-f-]*}\) .*$/\1/')
+		show_info "current VM: '$vm'"
+	fi
+
+else
+	vm_status=$(prlctl status "$vm" 2>/dev/null)
+	if [ $? -ne 0 ]; then
+		show_error "specified VM '$vm' doesn't exist"
+		exit 1
+	fi
+	echo "$vm_status" | grep -q ' running$' || start_vm "$vm"
+fi
+cmd="prlctl exec '$vm'"
+
+if [ -n "$user" ]; then
+	cmd="$cmd --user '$user'"
+else
+	cmd="$cmd --current-user"
+fi
+
+if (set -o posix; set) | grep -q '^password='; then
+	cmd="$cmd --password '$password'"
+fi
+
+eval $cmd '"$@"'

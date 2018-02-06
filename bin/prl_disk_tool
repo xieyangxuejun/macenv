@@ -1,0 +1,159 @@
+#!/bin/bash
+# vim:ts=4:sw=4:noexpandtab
+#
+# Special wrapper script for Parallels Desktop product startup
+# from command line.
+#
+# Copyright (c) 2004-2014 Parallels IP Holdings GmbH.
+# All rights reserved.
+# http://www.parallels.com
+
+# Follows recusively through all symlinks starting from $1 and returns absolute
+# path to the final target.
+function read_symlink() {
+	local path=$1
+	local pwd=$PWD
+	while true; do
+		cd "$(dirname "$path")"
+		path=$(basename "$path")
+		[ -L "$path" ] || break
+		path=$(readlink "$path")
+	done
+	echo $PWD/$path
+	cd "$pwd"
+}
+
+SELF_PATH=$(read_symlink "$0")
+BUNDLE_DIR=$(cd "`dirname "$SELF_PATH"`/../.."; pwd)
+BASENAME="$(basename "${0}")"
+SCRIPT_NAME="$(basename "$0")"
+LOG_TAG="pdfm-bootstrap"
+LOGGER_NAME="${SCRIPT_NAME}[$$]:"
+INITTOOL="${BUNDLE_DIR}/Contents/MacOS/inittool"
+LAUNCHER="${BUNDLE_DIR}/Contents/MacOS/launcher"
+PARALLELS_DISPATCHER_SERVICE="/MacOS/Parallels Service.app/Contents/MacOS/prl_disp_service"
+
+CONNECT_MAX_COUNT=30
+OUTPUT="/dev/null"
+
+MSG_FAILED_TO_INIT="Failed to initialize Parallels Desktop in unattended mode.
+This may be caused by ether corrupt installation or if you just installed Parallels Desktop.
+In order to initialize Parallels desktop ether:
+1. Start Paralles Desktop by double-clicking to Parallels Desktop bundle, or
+2. Run following initialization procedure from command line:
+sudo \"${INITTOOL}\" init -b \"${BUNDLE_DIR}\""
+
+
+RC_OK=0
+RC_INIT_FAILED=6
+RC_START_FAILED=7
+RC_WAIT_DISP_FAILED=8
+RC_TOOL_NOT_FOUND=9
+
+SUPPORTED_TOOLS=(
+		"Contents/MacOS/prlctl"
+		"Contents/MacOS/prlsrvctl"
+		"Contents/MacOS/prl_convert"
+		"Contents/MacOS/prl_perf_ctl"
+		"Contents/MacOS/prl_disk_tool"
+		)
+
+
+# Log to syslog and stderr
+# usage: log <error|warning|debug> "MESSAGE"
+function log {
+	local level=$1
+	shift
+	case "${level}" in
+		error)	 logger -t "${LOG_TAG}" -p install.error -s "${LOGGER_NAME} $@"
+			 ;;
+		warning) logger -t "${LOG_TAG}" -p install.warning -s "${LOGGER_NAME} $@"
+			 ;;
+		debug)   [ "$_DEBUG" == "true" ] && logger -t "${LOG_TAG}" -p install.debug -s "${LOGGER_NAME} $@"
+			 ;;
+		*)	 logger -t "${LOG_TAG}" -p install.info -s "${LOGGER_NAME} ${level} $@"
+			 ;;
+	esac
+}
+
+
+# Check services are running
+function is_running() {
+	ps ax | grep "$PARALLELS_DISPATCHER_SERVICE" | grep "$BUNDLE_DIR" | grep -v "grep" >$OUTPUT 2>&1 ||
+		ps ax | grep `basename "${PARALLELS_DISPATCHER_SERVICE}"` | grep "z-Build" | grep -v "grep" >$OUTPUT 2>&1
+}
+
+
+# Check and init bundle
+function init_bundle() {
+	"${INITTOOL}" check -b "${BUNDLE_DIR}" >${OUTPUT} 2>&1 && return 0
+	"${INITTOOL}" init -b "${BUNDLE_DIR}" >${OUTPUT} 2>&1 && return 0
+
+	log error "${MSG_FAILED_TO_INIT}"
+	return 1
+}
+
+# Start services
+function start_launcher() {
+	"${LAUNCHER}" start >${OUTPUT} 2>&1 && return 0
+
+	log error "${MSG_FAILED_TO_INIT}"
+	return 1
+}
+
+# Find tool path by name
+function resolve_tool() {
+	local tool_name="${1}"
+
+	if [ "x${tool_name}" == "x" ]; then
+		return 1
+	fi
+
+	for path in "${SUPPORTED_TOOLS[@]}"; do
+		if [ "x${tool_name}" == "x${path##*/}" ]; then
+			echo "${BUNDLE_DIR}/${path}"
+			return $([ -f "${BUNDLE_DIR}/${path}" ])
+		fi
+	done
+
+	return 1
+}
+
+# Wait for prl_disp_service is ready
+function wait_for_disp() {
+	log debug "Waiting for services "
+	out=""
+	for ((i=0; i<=$CONNECT_MAX_COUNT; i++)); do
+		out=$( "$(resolve_tool prlsrvctl)" info 2>&1)
+		if [ "x$?" = "x0" ]; then
+			log debug "Ok."
+			return 0
+		fi
+
+		log debug "."
+		sleep 1
+	done
+
+	log error "Dispather last try output: $out"
+	log error "${MSG_FAILED_TO_INIT}"
+	return 1
+}
+
+
+tool=$(resolve_tool "${BASENAME}")
+if [ "x$?" != "x0" ]; then
+	log error "Can't find ${BASENAME} instance"
+	exit $RC_TOOL_NOT_FOUND
+fi
+
+if ! is_running; then
+	log debug "Parallels Desktop is not running"
+	init_bundle || exit $RC_INIT_FAILED
+	start_launcher || exit $RC_START_FAILED
+	wait_for_disp || exit $RC_WAIT_DISP_FAILED
+else
+	log debug "Parallels Desktop already running"
+fi
+
+exec "${tool}" "$@"
+
